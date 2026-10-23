@@ -1,4 +1,8 @@
-# Whisper Local v2.0 · 三合一离线语音工作台
+> **优化分支 v3**：实时监听优先级调度、批处理逐文件让出 CPU、共享解码质量参数、可审计置信度、后台保留期清理和跨 Ubuntu CI。架构仍是单用户 CPU 工作台；主分支的老版本不受影响。
+
+> 新特性与环境变量请参考 [Ubuntu 部署指南](docs/DEPLOY_UBUNTU.md#9-v3-性能正确性与隐私改进)。旧版 README 以下关于统一 FIFO 队列、默认授权整个 HOME、仅启动时清理的描述已被 v3 策略替代。
+
+# Whisper Local v3.0 · CPU 优先的三合一离线语音工作台
 
 > **跨 Ubuntu 便携部署版本**：新增 `.env.example`、`scripts/common.sh`、venv/Conda 双模式以及 `docs/DEPLOY_UBUNTU.md`。**完整、最新的安装方法以 [Ubuntu 部署与配置指南](docs/DEPLOY_UBUNTU.md) 为准。** 旧版 README 中固定 Miniconda 路径和 `/mnt/sda4` 的操作示例仅适用于原始机器，不是所有 Ubuntu 的默认要求。
 
