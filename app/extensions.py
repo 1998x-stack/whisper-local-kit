@@ -173,8 +173,14 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
         return {"id": sid}
 
     @app.get("/api/live/{sid}")
-    def live_status(sid: str) -> dict[str, Any]:
-        return get_session(sid)
+    def live_status(sid: str, tail: int | None = None) -> dict[str, Any]:
+        session = get_session(sid)
+        if tail is not None:
+            if tail < 0 or tail > 200:
+                raise HTTPException(400, "tail 必须在 0–200 之间")
+            session["total_segments"] = len(session["segments"])
+            session["segments"] = session["segments"][-tail:] if tail else []
+        return session
 
     @app.post("/api/live/{sid}/stop")
     def stop_live(sid: str, x_local_whisper_client: str | None = Header(None, alias="X-Local-Whisper-Client")) -> dict[str, str]:
