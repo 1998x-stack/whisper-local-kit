@@ -14,3 +14,17 @@ const blob=encodeWav(clips[0].samples,rate);
 assert.ok(blob.size>44);
 assert.ok(phases.includes('recording')&&phases.includes('silent'));
 console.log('JS sound-gate tests OK: '+clips.map(c=>c.startSeconds.toFixed(2)).join(', '));
+
+const calibration=new AdaptiveSoundGate({sampleRate:rate});
+function calibrate(seconds,amplitude){
+  const n=Math.round(seconds*rate/frame);
+  for(let k=0;k<n;k++){
+    const a=new Float32Array(frame);
+    for(let i=0;i<frame;i++)a[i]=amplitude*Math.sin(2*Math.PI*200*i/rate);
+    calibration.push(a);
+  }
+}
+calibrate(1.0,0.001);calibrate(0.4,0.15);
+assert.ok(calibration.noiseDb < -45,'short loud event should not dominate the noise floor');
+calibration.recalibrate();
+assert.equal(calibration.calibrationCount,0);

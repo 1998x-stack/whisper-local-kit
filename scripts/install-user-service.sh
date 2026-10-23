@@ -13,13 +13,18 @@ After=default.target
 [Service]
 Type=simple
 WorkingDirectory=$ROOT
-# Resolved at install time: systemd need not find conda in its PATH.
+# Absolute Python path survives systemd's minimal PATH.
 Environment="WHISPER_PYTHON=$PYTHON"
 ExecStart=/usr/bin/bash "$ROOT/scripts/run.sh"
 Restart=on-failure
 RestartSec=5
 UMask=0077
 NoNewPrivileges=true
+Nice=10
+CPUWeight=50
+IOSchedulingClass=idle
+MemoryMax=8G
+TasksMax=128
 
 [Install]
 WantedBy=default.target
