@@ -215,6 +215,25 @@ def get_job(job_id: str) -> dict[str, Any]:
     return get_job_or_404(job_id)
 
 
+@app.delete("/api/jobs/{job_id}")
+def delete_job(
+    job_id: str,
+    x_local_whisper_client: str | None = Header(default=None, alias="X-Local-Whisper-Client"),
+) -> dict[str, bool]:
+    if x_local_whisper_client != "1":
+        raise HTTPException(403, "缺少本机请求标记")
+    get_job_or_404(job_id)
+    with lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "任务不存在")
+        if job["status"] in {"uploading", "queued", "running"}:
+            raise HTTPException(409, "任务尚未结束，不能删除")
+        jobs.pop(job_id)
+    shutil.rmtree(metadata_path(job_id).parent, ignore_errors=True)
+    return {"deleted": True}
+
+
 @app.get("/api/jobs/{job_id}/download/{fmt}")
 def download(job_id: str, fmt: str) -> FileResponse:
     job = get_job_or_404(job_id)
