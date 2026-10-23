@@ -10,6 +10,7 @@ export class AdaptiveSoundGate {
     this.calibrationEnd = sampleRate * 1.4;
     this.noiseDb = -65;
     this.calibrationCount = 0;
+    this.calibrationLevels = [];
     this.history = [];
     this.active = false;
     this.frames = [];
@@ -20,7 +21,7 @@ export class AdaptiveSoundGate {
     this.stats = {levelDb: -100, noiseDb: -65, thresholdDb: -53, elapsed: 0};
     this.preSamples = Math.round(sampleRate * 0.35);
     this.triggerSamples = Math.round(sampleRate * 0.18);
-    this.hangSamples = Math.round(sampleRate * 0.8);
+    this.hangSamples = Math.round(sampleRate * 1.2);
     this.maxSamples = Math.round(sampleRate * 22);
   }
   emitState(kind) {
@@ -44,7 +45,10 @@ export class AdaptiveSoundGate {
     this.stats = {levelDb: +db.toFixed(1), noiseDb: +this.noiseDb.toFixed(1),
                   thresholdDb: +this.threshold().toFixed(1), elapsed: this.samplesSeen / this.rate};
     if (this.samplesSeen <= this.calibrationEnd) {
-      this.noiseDb = this.calibrationCount ? (this.noiseDb * 0.92 + db * 0.08) : db;
+      // A lower percentile is less biased by a brief cough during calibration.
+      this.calibrationLevels.push(db);
+      const sorted = [...this.calibrationLevels].sort((a, b) => a - b);
+      this.noiseDb = sorted[Math.floor((sorted.length - 1) * 0.2)];
       this.calibrationCount++;
       this.emitState('calibrating');
       return;
@@ -53,8 +57,9 @@ export class AdaptiveSoundGate {
       this.history.push(frame);
       while (this.history.length > 1 && this.samplesSeen - this.history[0].begin > this.preSamples) this.history.shift();
       const isAbove = db >= this.threshold();
+      // A brief below-threshold frame should not erase a soft speech onset.
       if (isAbove) this.pendingAbove += buf.length;
-      else this.pendingAbove = 0;
+      else this.pendingAbove = Math.max(0, this.pendingAbove - buf.length * 0.5);
       if (this.pendingAbove >= this.triggerSamples) {
         this.active = true;
         this.frames = this.history.slice();
@@ -108,6 +113,17 @@ export class AdaptiveSoundGate {
       this.history = [];
       this.emitState('silent');
     }
+  }
+  recalibrate() {
+    this.calibrationEnd = this.samplesSeen + Math.round(this.rate * 1.4);
+    this.calibrationCount = 0;
+    this.calibrationLevels = [];
+    this.active = false;
+    this.frames = [];
+    this.history = [];
+    this.pendingAbove = 0;
+    this.silentSamples = 0;
+    this.emitState('calibrating');
   }
   finish() {this.flush(false); this.emitState('stopped');}
 }
