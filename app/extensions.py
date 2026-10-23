@@ -27,7 +27,7 @@ sessions: dict[str, dict[str, Any]] = {}
 
 def allowed_roots() -> list[Path]:
     configured = os.getenv("WHISPER_BATCH_ROOTS", "")
-    values = configured.split(":") if configured else [str(Path.home() / "Music"), str(Path.home() / "Downloads"), "/mnt/sda4"]
+    values = configured.split(":") if configured else [str(Path.home() / "Music"), str(Path.home() / "Downloads"), str(Path.home() / "Documents")]
     return [p for v in values if v.strip() if (p := Path(v).expanduser().resolve()).is_dir()]
 
 
@@ -36,7 +36,7 @@ def safe_directory(value: str, *, create: bool = False) -> Path:
         raise HTTPException(400, "文件夹路径不能为空")
     candidate = Path(value).expanduser().resolve()
     if not any(candidate == root or candidate.is_relative_to(root) for root in allowed_roots()):
-        raise HTTPException(403, "文件夹不在允许的本地目录中（默认：用户主目录或 /mnt/sda4）")
+        raise HTTPException(403, "文件夹不在允许的本地目录中（请配置 WHISPER_BATCH_ROOTS，默认仅 Music/Downloads/Documents）")
     if any(part.startswith(".") for part in candidate.parts[1:]):
         raise HTTPException(403, "为安全起见，批处理路径不允许隐藏目录")
     if create:
