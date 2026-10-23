@@ -1,1 +1,8 @@
-{"private":true,"type":"module","description":"Static browser sound activity detector tests; no npm installation required"}
+{
+  "private": true,
+  "type": "module",
+  "description": "Static browser sound activity detector tests; no npm installation required",
+  "scripts": {
+    "test": "node tests/test_sound_gate.mjs"
+  }
+}
