@@ -11,7 +11,11 @@ import subprocess
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+import logging
+from fastapi import Request
+from .scheduler import PriorityExecutor
+from .processing import decode_file, simple_segments, transcript_text
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,9 +39,48 @@ MODEL_CHOICES = {"tiny", "base", "small"}
 LANGUAGE_CHOICES = {"auto": None, "zh": "zh", "en": "en", "ja": "ja", "ko": "ko", "fr": "fr", "de": "de", "es": "es"}
 TASK_CHOICES = {"transcribe", "translate"}
 
-app = FastAPI(title="Whisper Local", version="1.0.0", docs_url="/api/docs", redoc_url=None)
+logger = logging.getLogger("whisper_local")
+
+
+def sweep_expired() -> None:
+    cutoff = time.time() - RETENTION_DAYS * 86400
+    with lock:
+        expired = [jid for jid, job in jobs.items()
+                   if job["status"] not in {"uploading", "queued", "running"}
+                   and metadata_path(jid).is_file()
+                   and metadata_path(jid).stat().st_mtime < cutoff]
+        for jid in expired:
+            jobs.pop(jid, None)
+    for jid in expired:
+        shutil.rmtree(metadata_path(jid).parent, ignore_errors=True)
+    from .extensions import prune_sessions
+    prune_sessions(DATA_ROOT, cutoff)
+
+
+def _sweep_loop(stop: threading.Event) -> None:
+    while not stop.wait(3600):
+        try:
+            sweep_expired()
+        except Exception:
+            logger.exception("Periodic transcript cleanup failed")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    startup()
+    stop = threading.Event()
+    cleaner = threading.Thread(target=_sweep_loop, args=(stop,), daemon=True)
+    cleaner.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        cleaner.join(timeout=2)
+
+
+app = FastAPI(title="Whisper Local", version="3.0.0", docs_url="/api/docs", redoc_url=None, lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"])
-executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper-local")
+executor = PriorityExecutor()
 lock = threading.Lock()
 jobs: dict[str, dict[str, Any]] = {}
 model_cache: dict[str, Any] = {"name": None, "model": None}
@@ -92,7 +135,6 @@ def load_saved() -> None:
             continue
 
 
-@app.on_event("startup")
 def startup() -> None:
     os.umask(0o077)
     DATA_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -112,6 +154,18 @@ def startup() -> None:
                     continue
 
 
+@app.middleware("http")
+async def privacy_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(PROJECT_ROOT / "web" / "index.html", media_type="text/html; charset=utf-8")
@@ -129,6 +183,7 @@ def health() -> dict[str, Any]:
         "max_upload_mb": MAX_BYTES // (1024 * 1024),
         "max_duration_seconds": MAX_DURATION,
         "no_api_key": True,
+        "scheduler": "live > upload > batch-file",
         "bind_recommendation": "127.0.0.1 ONLY",
     }
 
@@ -136,7 +191,11 @@ def health() -> dict[str, Any]:
 @app.get("/api/jobs")
 def list_jobs() -> list[dict[str, Any]]:
     with lock:
-        return sorted((dict(j) for j in jobs.values()), key=lambda j: j["created_at"], reverse=True)[:30]
+        recent = sorted((j for j in jobs.values() if j.get("kind") != "live"),
+                        key=lambda j: j["created_at"], reverse=True)[:30]
+        return [{**{k: v for k, v in j.items() if k != "text"},
+                 "text_preview": str(j.get("text", ""))[:1000],
+                 "errors": j.get("errors", [])[:3]} for j in recent]
 
 
 def get_job_or_404(job_id: str) -> dict[str, Any]:
@@ -205,23 +264,23 @@ def process_job(job_id: str, input_path: Path, model_name: str, language: str, t
         update(job_id, duration_seconds=round(duration, 2), stage=f"加载 {model_name} 模型（首次使用可能联网下载）")
         model = load_model(model_name)
         update(job_id, stage="正在 CPU 转写：长音频可能耗时较久")
-        result = model.transcribe(
-            str(input_path), language=LANGUAGE_CHOICES[language], task=task,
-            fp16=False, verbose=None, temperature=0, beam_size=1, best_of=1,
-            word_timestamps=False,
-        )
-        segments = [
-            {"start": round(float(s["start"]), 3), "end": round(float(s["end"]), 3), "text": str(s["text"]).strip()}
-            for s in result.get("segments", [])
-        ]
-        text = str(result.get("text", "")).strip()
+        started = time.monotonic()
+        result = decode_file(model, input_path, LANGUAGE_CHOICES[language], task=task)
+        inference_seconds = time.monotonic() - started
+        segments = simple_segments(result)
+        text = transcript_text(result, segments)
         (folder / "result.txt").write_text(text + ("\n" if text else ""), encoding="utf-8")
         (folder / "result.srt").write_text(to_srt(segments), encoding="utf-8")
         (folder / "result.vtt").write_text(to_vtt(segments), encoding="utf-8")
         (folder / "result.json").write_text(
             json.dumps({"text": text, "language": result.get("language"), "segments": segments}, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        update(job_id, status="complete", stage="完成", text=text, language_detected=result.get("language"), segments_count=len(segments))
+        rtf = round(inference_seconds / duration, 3)
+        logger.info("transcribed job=%s model=%s audio_s=%.2f inference_s=%.2f rtf=%.3f",
+                    job_id, model_name, duration, inference_seconds, rtf)
+        update(job_id, status="complete", stage="完成", text=text,
+               inference_seconds=round(inference_seconds, 2), real_time_factor=rtf,
+               language_detected=result.get("language"), segments_count=len(segments))
     except Exception as exc:
         update(job_id, status="failed", stage="失败", error=f"{type(exc).__name__}: {exc}")
     finally:
@@ -233,6 +292,7 @@ def process_job(job_id: str, input_path: Path, model_name: str, language: str, t
 
 @app.post("/api/transcribe", status_code=202)
 async def transcribe(
+    request: Request,
     file: UploadFile = File(...),
     model: str = Form("tiny"),
     language: str = Form("zh"),
@@ -245,6 +305,9 @@ async def transcribe(
         raise HTTPException(status_code=403, detail="需要 X-Local-Whisper-Client: 1 请求头")
     if model not in MODEL_CHOICES or language not in LANGUAGE_CHOICES or task not in TASK_CHOICES:
         raise HTTPException(status_code=400, detail="模型、语言或任务参数不正确")
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdecimal() and int(content_length) > MAX_BYTES + 65536:
+        raise HTTPException(413, f"请求体超过限制（文件最多 {MAX_BYTES // 1048576} MB）")
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in ALLOWED_EXT:
         raise HTTPException(status_code=400, detail="不支持的文件扩展名")
@@ -252,7 +315,8 @@ async def transcribe(
         raise HTTPException(status_code=503, detail="FFmpeg / ffprobe 未安装或不在 PATH")
 
     with lock:
-        outstanding = sum(j["status"] in ("uploading", "queued", "running") for j in jobs.values())
+        outstanding = sum(j["status"] in ("uploading", "queued", "running")
+                          and j.get("kind") != "live" for j in jobs.values())
         if outstanding >= MAX_OUTSTANDING:
             raise HTTPException(status_code=429, detail="任务队列已满，请完成现有任务后再提交")
         job_id = str(uuid.uuid4())
@@ -281,16 +345,17 @@ async def transcribe(
         if total == 0:
             raise HTTPException(status_code=400, detail="上传文件为空")
         update(job_id, status="queued", stage="等待 CPU 队列", size_bytes=total)
-        executor.submit(process_job, job_id, incoming, model, language, task)
+        executor.submit(process_job, job_id, incoming, model, language, task, priority=10)
         return {"id": job_id, "status": "queued", "poll_url": f"/api/jobs/{job_id}"}
-    except Exception:
+    except Exception as exc:
         incoming.unlink(missing_ok=True)
-        update(job_id, status="failed", stage="上传失败", error="上传格式不正确或文件过大")
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        update(job_id, status="failed", stage="上传失败", error=str(detail)[:300])
         raise
     finally:
         await file.close()
 
-# v2: local batch / microphone extensions, sharing this app's single CPU queue.
+# v3: extensions share the priority-aware single CPU inference lane.
 from .extensions import register as register_extensions  # noqa: E402
 register_extensions(app, globals())
 
