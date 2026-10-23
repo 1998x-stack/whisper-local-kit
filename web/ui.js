@@ -1,7 +1,7 @@
 import {AdaptiveSoundGate, encodeWav} from './sound-gate.js';
 const $=s=>document.getElementById(s);
 const headers={'X-Local-Whisper-Client':'1'};
-const states={uploading:'上传中',queued:'排队中',running:'转写中',complete:'完成',failed:'失败',interrupted:'中断'};
+const states={uploading:'上传中',queued:'排队中',running:'转写中',complete:'完成',completed_with_errors:'部分失败',failed:'失败',interrupted:'中断'};
 const escapeHTML=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=t=>{const x=Math.max(0,Math.floor(Number(t)||0));return `${String(Math.floor(x/60)).padStart(2,'0')}:${String(x%60).padStart(2,'0')}`;};
 function tab(name){document.querySelectorAll('.tab').forEach(e=>e.classList.toggle('active',e.dataset.tab===name));document.querySelectorAll('.mode').forEach(e=>e.classList.toggle('hidden',e.id!==`pane-${name}`));}
@@ -39,9 +39,9 @@ $('batch-start').onclick=async()=>{
 async function refreshJobs(){
   try{const d=await request('/api/jobs');const root=$('jobs');if(!d.length){root.innerHTML='<div class="empty">暂无任务</div>';return;}
   root.innerHTML=d.slice(0,25).map(j=>{
-    const suffix=j.kind==='batch'?` · 已完成 ${j.completed_files||0}/${j.total_files||0} · 跳过 ${j.skipped_files||0} · 失败 ${j.failed_files||0}`:'';
+    const suffix=j.kind==='batch'?` · 已完成 ${j.completed_files||0}/${j.total_files||0} · 无语音 ${j.no_speech_files||0} · 跳过 ${j.skipped_files||0} · 失败 ${j.failed_files||0}`:j.real_time_factor!=null?` · RTF ${j.real_time_factor}`:'';
     const downloads=j.status==='complete'&&(!j.kind||j.kind==='upload')?`<div class="downloads">${['txt','srt','vtt','json'].map(f=>`<a href="/api/jobs/${encodeURIComponent(j.id)}/download/${f}">${f.toUpperCase()}</a>`).join('')}</div>`:'';
-    const preview=j.text?`<div class="preview">${escapeHTML(j.text.slice(0,1000))}</div>`:'';
+    const preview=j.text_preview?`<div class="preview">${escapeHTML(j.text_preview)}</div>`:'';
     const errors=j.errors?.length?`<div class="error">失败样例：${escapeHTML(j.errors.slice(0,3).map(x=>x.file+': '+x.error).join(' | '))}</div>`:'';
     return `<div class="job"><div class="jobhead"><b class="jobname">${escapeHTML(j.name)}</b><span class="pill ${escapeHTML(j.status)}">${states[j.status]||escapeHTML(j.status)}</span></div><div class="stage">${escapeHTML(j.stage||'')} ${escapeHTML(suffix)} ${j.error?`<span class="error">${escapeHTML(j.error)}</span>`:''}</div>${preview}${downloads}${errors}</div>`;
   }).join('');
