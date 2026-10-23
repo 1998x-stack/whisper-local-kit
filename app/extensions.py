@@ -73,6 +73,11 @@ def safe_output(path: Path, output_root: Path) -> bool:
     return parent.is_relative_to(output_root) and not path.is_symlink()
 
 
+class GapRequest(BaseModel):
+    offset_seconds: float = Field(ge=0, le=86400)
+    duration_seconds: float = Field(ge=0.05, le=30)
+
+
 class BatchRequest(BaseModel):
     input_directory: str = Field(min_length=1, max_length=1024)
     output_directory: str | None = Field(default=None, max_length=1024)
@@ -161,7 +166,7 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
         sid = str(uuid.uuid4())
         s = {"id": sid, "created_at": ctx["utcnow"](), "status": "monitoring",
              "model": model, "language": language, "segments": [], "submitted": 0,
-             "completed": 0, "failed": 0, "last_error": None}
+             "completed": 0, "failed": 0, "dropped": 0, "last_error": None}
         with SESSION_LOCK:
             sessions[sid] = s
             persist_session(s)
@@ -198,6 +203,28 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
         media_type = "application/json" if fmt == "json" else "text/plain; charset=utf-8"
         return Response(content, media_type=media_type,
                         headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    @app.post("/api/live/{sid}/gaps", status_code=202)
+    def record_gap(sid: str, gap: GapRequest,
+                   x_local_whisper_client: str | None = Header(None, alias="X-Local-Whisper-Client")) -> dict[str, int]:
+        """Mark an unsent client clip visibly in the persistent SRT timeline."""
+        check_header(x_local_whisper_client)
+        get_session(sid)
+        with SESSION_LOCK:
+            session = sessions[sid]
+            if session["status"] != "monitoring":
+                raise HTTPException(409, "监听已经停止")
+            if session.get("dropped", 0) >= 1000:
+                raise HTTPException(429, "本次会话未提交片段数量过多")
+            start = gap.offset_seconds
+            end = min(86400.0, start + gap.duration_seconds)
+            session["segments"].append({
+                "start": round(start, 3), "end": round(end, 3),
+                "text": f"[未转写 · {start:.1f}–{end:.1f}s]", "kind": "gap"})
+            session["segments"].sort(key=lambda item: (item["start"], item["end"]))
+            session["dropped"] = session.get("dropped", 0) + 1
+            persist_session(session)
+            return {"dropped": session["dropped"]}
 
     def run_live(jid: str, file: Path, model: str, language: str, sid: str, offset: float, duration: float) -> None:
         try:
