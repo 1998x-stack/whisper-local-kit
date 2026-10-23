@@ -1,12 +1,6 @@
-__pycache__/
-*.py[cod]
-.venv/
 .env
-.env.*
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
 *.log
-*.sqlite3
-recordings/
-models/
-media/
-node_modules/
-.DS_Store

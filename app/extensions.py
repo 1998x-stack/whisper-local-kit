@@ -26,7 +26,7 @@ sessions: dict[str, dict[str, Any]] = {}
 
 def allowed_roots() -> list[Path]:
     configured = os.getenv("WHISPER_BATCH_ROOTS", "")
-    values = configured.split(":") if configured else [str(Path.home()), "/mnt/sda4"]
+    values = configured.split(":") if configured else [str(Path.home())]
     return [p for v in values if v.strip() if (p := Path(v).expanduser().resolve()).is_dir()]
 
 

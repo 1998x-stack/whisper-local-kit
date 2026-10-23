@@ -28,8 +28,8 @@ MODEL_DIR = Path(os.getenv("WHISPER_MODEL_DIR", str(Path.home() / ".cache/whispe
 MAX_BYTES = min(1024, max(1, int(os.getenv("WHISPER_MAX_UPLOAD_MB", "200")))) * 1024 * 1024
 MAX_DURATION = min(86400, max(30, int(os.getenv("WHISPER_MAX_DURATION_SECONDS", "7200"))))
 THREADS = max(1, min(8, int(os.getenv("WHISPER_THREADS", "2"))))
-MAX_OUTSTANDING = 3
-RETENTION_DAYS = 7
+MAX_OUTSTANDING = max(1, min(20, int(os.getenv("WHISPER_MAX_OUTSTANDING", "3"))))
+RETENTION_DAYS = max(1, min(365, int(os.getenv("WHISPER_RETENTION_DAYS", "7"))))
 ALLOWED_EXT = {".mp3", ".wav", ".m4a", ".mp4", ".mov", ".mkv", ".flac", ".ogg", ".opus", ".webm", ".aac", ".wma"}
 MODEL_CHOICES = {"tiny", "base", "small"}
 LANGUAGE_CHOICES = {"auto": None, "zh": "zh", "en": "en", "ja": "ja", "ko": "ko", "fr": "fr", "de": "de", "es": "es"}
@@ -98,6 +98,18 @@ def startup() -> None:
     DATA_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     MODEL_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     load_saved()
+    # Bound disk retention for live-session transcripts as well as uploaded jobs.
+    live_root = DATA_ROOT / "live"
+    if live_root.is_dir():
+        cutoff = time.time() - RETENTION_DAYS * 86400
+        for directory in live_root.iterdir():
+            if directory.is_dir() and not directory.is_symlink():
+                try:
+                    uuid.UUID(directory.name)
+                    if directory.stat().st_mtime < cutoff:
+                        shutil.rmtree(directory)
+                except (ValueError, OSError):
+                    continue
 
 
 @app.get("/")

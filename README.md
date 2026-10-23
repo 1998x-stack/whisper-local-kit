@@ -1,5 +1,8 @@
 # Whisper Local v2.0 · 三合一离线语音工作台
 
+> **跨 Ubuntu 便携部署版本**：新增 `.env.example`、`scripts/common.sh`、venv/Conda 双模式以及 `docs/DEPLOY_UBUNTU.md`。**完整、最新的安装方法以 [Ubuntu 部署与配置指南](docs/DEPLOY_UBUNTU.md) 为准。** 旧版 README 中固定 Miniconda 路径和 `/mnt/sda4` 的操作示例仅适用于原始机器，不是所有 Ubuntu 的默认要求。
+
+
 **目标电脑**：Ubuntu 20.04 / 16 GB RAM / Intel i7-3687U CPU / Lenovo SSD / FFmpeg / Conda `whisper-cpu`。默认仅绑定 `127.0.0.1:7865`，不使用任何远程语音 API、无需 OpenAI API Key。**初次安装软件包及模型需要联网。** 上传、麦克风监听和批量任务共享一个 CPU 队列，建议不要在批量转写时同时开启监听。
 
 ## 新版三种模式
