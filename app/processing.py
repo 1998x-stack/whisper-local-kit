@@ -3,6 +3,14 @@ import os
 import uuid
 from pathlib import Path
 from typing import Any
+from opencc import OpenCC
+
+
+_simplify_chinese = OpenCC("t2s")
+
+
+def simplify_chinese(text: str) -> str:
+    return _simplify_chinese.convert(text)
 
 
 def decode_file(model: Any, path: Path, language: str | None, *, task: str = "transcribe", live: bool = False) -> dict[str, Any]:
@@ -17,7 +25,17 @@ def decode_file(model: Any, path: Path, language: str | None, *, task: str = "tr
     prompt = os.getenv("WHISPER_ZH_INITIAL_PROMPT", "").strip()
     if language == "zh" and task == "transcribe" and prompt:
         options["initial_prompt"] = prompt[:300]
-    return model.transcribe(str(path), **options)
+    result: dict[str, Any] = model.transcribe(str(path), **options)
+    if task == "transcribe" and (language == "zh" or result.get("language") == "zh"):
+        return {
+            **result,
+            "text": simplify_chinese(str(result.get("text", ""))),
+            "segments": [
+                {**segment, "text": simplify_chinese(str(segment.get("text", "")))}
+                for segment in result.get("segments", [])
+            ],
+        }
+    return result
 
 
 def simple_segments(result: dict[str, Any], offset: float = 0.0, duration: float | None = None,

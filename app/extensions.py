@@ -7,12 +7,15 @@ import json
 import os
 import threading
 import uuid
+import wave
 from pathlib import Path
 from typing import Any
 
 from fastapi import Body, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import Response
 from .processing import decode_file, simple_segments, atomic_text
+from .server_microphone import register as register_server_microphone
+from .sound_gate import Clip
 from pydantic import BaseModel, Field
 
 from .subtitles import to_srt, to_vtt
@@ -279,6 +282,38 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
         finally:
             file.unlink(missing_ok=True)
 
+    def enqueue_live_clip(jid: str, path: Path, session: dict[str, Any], sid: str,
+                          offset: float, duration: float) -> None:
+        with SESSION_LOCK:
+            sessions[sid]["submitted"] += 1
+            persist_session(sessions[sid])
+        ctx["executor"].submit(run_live, jid, path, session["model"], session["language"],
+                               sid, offset, duration, priority=0)
+
+    def queue_server_clip(sid: str, clip: Clip) -> None:
+        session = get_session(sid)
+        try:
+            jid = job_create("live", f"主机监听 +{clip.offset_seconds:.1f}s",
+                             session["model"], session["language"], session_id=sid)
+        except HTTPException as exc:
+            if exc.status_code == 429:
+                record_gap(sid, GapRequest(offset_seconds=clip.offset_seconds,
+                                           duration_seconds=clip.duration_seconds), "1")
+                return
+            raise
+        path = ctx["metadata_path"](jid).parent / "clip.wav"
+        try:
+            with wave.open(str(path), "wb") as output:
+                output.setnchannels(1)
+                output.setsampwidth(2)
+                output.setframerate(16000)
+                output.writeframes(clip.pcm)
+            enqueue_live_clip(jid, path, session, sid, clip.offset_seconds, clip.duration_seconds)
+        except (OSError, RuntimeError, wave.Error, HTTPException):
+            path.unlink(missing_ok=True)
+            ctx["update"](jid, status="failed", stage="主机录音提交失败")
+            raise
+
     @app.post("/api/live/{sid}/chunks", status_code=202)
     async def live_chunk(
         sid: str, file: UploadFile = File(...),
@@ -308,10 +343,7 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
                     f.write(chunk)
             if not size:
                 raise HTTPException(400, "收到空音频片段")
-            with SESSION_LOCK:
-                sessions[sid]["submitted"] += 1
-                persist_session(sessions[sid])
-            ctx["executor"].submit(run_live, jid, path, s["model"], s["language"], sid, offset_seconds, duration_seconds, priority=0)
+            enqueue_live_clip(jid, path, s, sid, offset_seconds, duration_seconds)
             return {"id": jid, "status": "queued"}
         except Exception:
             path.unlink(missing_ok=True)
@@ -397,3 +429,10 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
         inp = safe_directory(request.input_directory)
         files = list_mp3(inp, request.recursive)
         return {"count": len(files), "files": [str(f.relative_to(inp)) for f in files[:40]]}
+
+    register_server_microphone(
+        app,
+        lambda model, language: create_live(model, language, "1")["id"],
+        queue_server_clip,
+        lambda sid: stop_live(sid, "1"),
+    )

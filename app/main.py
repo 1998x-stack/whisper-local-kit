@@ -1,7 +1,7 @@
-"""CPU-first, loopback-only, keyless personal Whisper transcription server.
+"""CPU-first, keyless personal Whisper transcription server.
 
-Run: python -m uvicorn app.main:app --host 127.0.0.1 --port 7865 --workers 1
-Do not expose this unauthenticated application to an untrusted network.
+Run: bash scripts/run.sh
+Bind only to a trusted interface; this application has no authentication.
 """
 import json
 import math
@@ -15,13 +15,13 @@ from contextlib import asynccontextmanager
 import logging
 from fastapi import Request
 from .scheduler import PriorityExecutor
-from .processing import decode_file, simple_segments, transcript_text
+from .processing import decode_file, simple_segments, simplify_chinese, transcript_text
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from .subtitles import to_srt, to_vtt
@@ -74,12 +74,13 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        _.state.server_microphone.stop()
         stop.set()
         cleaner.join(timeout=2)
 
 
 app = FastAPI(title="Whisper Local", version="3.0.0", docs_url="/api/docs", redoc_url=None, lifespan=lifespan)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"])
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver", os.getenv("WHISPER_HOST", "127.0.0.1")])
 executor = PriorityExecutor()
 lock = threading.Lock()
 jobs: dict[str, dict[str, Any]] = {}
@@ -184,7 +185,7 @@ def health() -> dict[str, Any]:
         "max_duration_seconds": MAX_DURATION,
         "no_api_key": True,
         "scheduler": "live > upload > batch-file",
-        "bind_recommendation": "127.0.0.1 ONLY",
+        "bind_recommendation": os.getenv("WHISPER_HOST", "127.0.0.1"),
     }
 
 
@@ -193,9 +194,26 @@ def list_jobs() -> list[dict[str, Any]]:
     with lock:
         recent = sorted((j for j in jobs.values() if j.get("kind") != "live"),
                         key=lambda j: j["created_at"], reverse=True)[:30]
-        return [{**{k: v for k, v in j.items() if k != "text"},
-                 "text_preview": str(j.get("text", ""))[:1000],
-                 "errors": j.get("errors", [])[:3]} for j in recent]
+        summaries = []
+        for job in recent:
+            srt_preview = ""
+            srt_truncated = False
+            if job["status"] == "complete" and job.get("kind") != "batch":
+                srt_path = metadata_path(job["id"]).parent / "result.srt"
+                if srt_path.is_file():
+                    with srt_path.open(encoding="utf-8") as stream:
+                        excerpt = stream.read(16001)
+                        srt_preview = excerpt[:16000]
+                        srt_truncated = len(excerpt) > 16000
+            chinese = job.get("task") == "transcribe" and (
+                job.get("requested_language") == "zh" or job.get("language_detected") == "zh")
+            text_preview = str(job.get("text", ""))[:1000]
+            summaries.append({**{k: v for k, v in job.items() if k != "text"},
+                              "text_preview": simplify_chinese(text_preview) if chinese else text_preview,
+                              "srt_preview": simplify_chinese(srt_preview) if chinese else srt_preview,
+                              "srt_preview_truncated": srt_truncated,
+                              "errors": job.get("errors", [])[:3]})
+        return summaries
 
 
 def get_job_or_404(job_id: str) -> dict[str, Any]:
@@ -207,7 +225,11 @@ def get_job_or_404(job_id: str) -> dict[str, Any]:
         j = jobs.get(job_id)
         if j is None:
             raise HTTPException(status_code=404, detail="任务不存在")
-        return dict(j)
+        result = dict(j)
+        if result.get("task") == "transcribe" and (
+                result.get("requested_language") == "zh" or result.get("language_detected") == "zh"):
+            result["text"] = simplify_chinese(str(result.get("text", "")))
+        return result
 
 
 @app.get("/api/jobs/{job_id}")
@@ -235,14 +257,21 @@ def delete_job(
 
 
 @app.get("/api/jobs/{job_id}/download/{fmt}")
-def download(job_id: str, fmt: str) -> FileResponse:
+def download(job_id: str, fmt: str) -> Response:
     job = get_job_or_404(job_id)
     if job["status"] != "complete" or fmt not in {"txt", "srt", "vtt", "json"}:
         raise HTTPException(status_code=404, detail="文件不可用")
     path = metadata_path(job_id).parent / f"result.{fmt}"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(path, filename=f"whisper-{job_id[:8]}.{fmt}")
+    source_name = job.get("original_filename", job["name"])
+    response = FileResponse(path, filename=f"{Path(source_name).stem}.{fmt}")
+    if job.get("task") == "transcribe" and (
+            job.get("requested_language") == "zh" or job.get("language_detected") == "zh"):
+        return Response(content=simplify_chinese(path.read_text(encoding="utf-8")),
+                        media_type=response.media_type,
+                        headers={"Content-Disposition": response.headers["content-disposition"]})
+    return response
 
 
 def probe_audio(path: Path) -> float:
@@ -322,7 +351,7 @@ async def transcribe(
     x_local_whisper_client: str | None = Header(default=None, alias="X-Local-Whisper-Client"),
 ) -> dict[str, str]:
     # Non-secret custom header: prevents a simple cross-site HTML form from submitting jobs.
-    # This is NOT authentication. Keep the server bound to 127.0.0.1.
+    # This is NOT authentication. Bind only to a trusted interface.
     if x_local_whisper_client != "1":
         raise HTTPException(status_code=403, detail="需要 X-Local-Whisper-Client: 1 请求头")
     if model not in MODEL_CHOICES or language not in LANGUAGE_CHOICES or task not in TASK_CHOICES:
@@ -345,6 +374,7 @@ async def transcribe(
         now = utcnow()
         data: dict[str, Any] = {
             "id": job_id, "name": Path(file.filename or "audio").name[:120], "model": model,
+            "original_filename": Path(file.filename or "audio").name,
             "requested_language": language, "task": task, "status": "uploading",
             "stage": "上传中", "created_at": now, "updated_at": now,
         }

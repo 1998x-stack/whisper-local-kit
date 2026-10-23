@@ -34,6 +34,8 @@ class APITests(unittest.TestCase):
             with TestClient(main.app) as c:
                 self.assertEqual(c.get('/api/health').status_code, 200)
                 self.assertEqual(c.get('/assets/sound-gate.js').status_code,200)
+                with patch.dict(os.environ, {'WHISPER_HOST_MIC_TOKEN': 'test-token'}):
+                    self.assertEqual(c.post('/api/server-mic/start',json={'model':'tiny'}).status_code,403)
                 self.assertEqual(c.post('/api/batch', json={'input_directory':root}).status_code,403)
                 h={'X-Local-Whisper-Client':'1'}
                 resp=c.post('/api/live/sessions',headers=h,json={'model':'tiny','language':'zh'})
@@ -93,9 +95,18 @@ class APITests(unittest.TestCase):
                 self.assertIn('real_time_factor',uploaded)
                 preview=c.get('/api/jobs').json()
                 self.assertTrue(any(j['id']==uid and 'text_preview' in j and 'text' not in j for j in preview))
+                self.assertTrue(any(j['id']==uid and '00:00:00,200' in j.get('srt_preview', '') for j in preview))
                 response=c.get(f'/api/jobs/{uid}/download/json')
                 self.assertEqual(response.status_code,200,response.text)
                 self.assertIn('unfiltered_segments',response.json())
+                srt_response=c.get(f'/api/jobs/{uid}/download/srt')
+                self.assertIn('filename="test.srt"',srt_response.headers['content-disposition'])
+                saved_srt = main.metadata_path(uid).parent / 'result.srt'
+                saved_srt.write_text('1\n00:00:00,200 --> 00:00:01,100\n因為我聽過\n', encoding='utf-8')
+                self.assertIn('因为我听过', c.get(f'/api/jobs/{uid}/download/srt').text)
+                refreshed = next(j for j in c.get('/api/jobs').json() if j['id'] == uid)
+                self.assertIn('因为我听过', refreshed['srt_preview'])
+                self.assertIn('因為我聽過', saved_srt.read_text(encoding='utf-8'))
                 self.assertEqual(c.get('/api/jobs').headers.get('cache-control'),'no-store')
                 # Deletion requires the local request marker.
                 self.assertEqual(c.delete(f'/api/jobs/{jid2}').status_code,403)

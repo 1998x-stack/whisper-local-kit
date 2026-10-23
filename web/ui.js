@@ -40,8 +40,8 @@ async function refreshJobs(){
   try{const d=await request('/api/jobs');const root=$('jobs');if(!d.length){root.innerHTML='<div class="empty">暂无任务</div>';return;}
   root.innerHTML=d.slice(0,25).map(j=>{
     const suffix=j.kind==='batch'?` · 已完成 ${j.completed_files||0}/${j.total_files||0} · 无语音 ${j.no_speech_files||0} · 跳过 ${j.skipped_files||0} · 失败 ${j.failed_files||0}`:j.real_time_factor!=null?` · RTF ${j.real_time_factor}`:'';
-    const downloads=j.status==='complete'&&(!j.kind||j.kind==='upload')?`<div class="downloads">${['txt','srt','vtt','json'].map(f=>`<a href="/api/jobs/${encodeURIComponent(j.id)}/download/${f}">${f.toUpperCase()}</a>`).join('')}</div>`:'';
-    const preview=j.text_preview?`<div class="preview">${escapeHTML(j.text_preview)}</div>`:'';
+    const downloads=j.status==='complete'&&(!j.kind||j.kind==='upload')?`<div class="downloads">${['srt','txt','vtt','json'].map(f=>`<a href="/api/jobs/${encodeURIComponent(j.id)}/download/${f}">${f.toUpperCase()}</a>`).join('')}</div>`:'';
+    const preview=j.srt_preview?`<div class="hint">SRT 字幕预览${j.srt_preview_truncated?' · 仅显示开头，完整内容请下载':''}</div><div class="preview" role="region" aria-label="SRT 字幕预览">${escapeHTML(j.srt_preview)}</div>`:'';
     const errors=j.errors?.length?`<div class="error">失败样例：${escapeHTML(j.errors.slice(0,3).map(x=>x.file+': '+x.error).join(' | '))}</div>`:'';
     const remove=['complete','failed','interrupted','completed_with_errors'].includes(j.status)?`<button class="btn outline" data-delete-job="${escapeHTML(j.id)}">删除记录</button>`:'';
     return `<div class="job"><div class="jobhead"><b class="jobname">${escapeHTML(j.name)}</b><span class="pill ${escapeHTML(j.status)}">${states[j.status]||escapeHTML(j.status)}</span></div><div class="stage">${escapeHTML(j.stage||'')} ${escapeHTML(suffix)} ${j.error?`<span class="error">${escapeHTML(j.error)}</span>`:''}</div>${preview}${downloads}${errors}${remove}</div>`;
@@ -56,13 +56,13 @@ $('jobs').addEventListener('click',async e=>{
   catch(error){$('health').textContent='删除失败：'+error.message;}
 });
 let liveSession=null, micStream=null, micContext=null, micSource=null, micNode=null, gate=null;
-let monitoring=false, sending=false, stopping=false, pending=[], dropped=0;
+let monitoring=false, serverMonitoring=false, sending=false, stopping=false, pending=[], dropped=0;
 let drainPromise=null, gapWrites=[];
 function micState(state,stats){
   $('mic-orb').className=`orb ${state==='recording'?'recording':state==='calibrating'?'calibrating':'silent'}`;
   $('mic-glyph').textContent=state==='recording'?'●':'◌';
-  $('live-state').textContent={calibrating:'校准环境底噪…',silent:'静止待机 · 检测中',recording:'检测到声音 · 采集中',stopped:'监听已停止'}[state]||'等待开始';
-  $('live-note').textContent=state==='recording'?'正在本机录制这段声音':'未检测到明显声音时，不提交推理任务';
+  $('live-state').textContent={calibrating:'校准环境底噪…',silent:'静止待机 · 检测中',recording:'检测到声音 · 采集中',stopped:'监听已停止',failed:'主机麦克风已停止'}[state]||'等待开始';
+  $('live-note').textContent=state==='recording'?'正在本机录制这段声音':state==='stopped'||state==='failed'?'麦克风已关闭':'未检测到明显声音时，不提交推理任务';
   $('meter-fill').style.width=`${Math.max(0,Math.min(100,(stats.levelDb+80)/70*100))}%`;
   $('meter-label').textContent=`当前 ${stats.levelDb} dBFS · 触发阈值 ${stats.thresholdDb} dBFS · 背景 ${stats.noiseDb} dBFS`;
   $('elapsed').textContent=fmt(stats.elapsed);
@@ -140,7 +140,7 @@ async function beginMic(){
     await micContext.resume();
     monitoring=true;pending=[];dropped=0;gapWrites=[];
     $('mic-btn').textContent='停止监听并生成字幕';
-    $('live-model').disabled=true;$('live-lang').disabled=true;
+    $('live-model').disabled=true;$('live-lang').disabled=true;$('live-source').disabled=true;
     $('live-message').textContent='已请求麦克风权限。仅在检测到声音时发送录音片段给本机 Whisper。';
   }catch(e){micStream?.getTracks().forEach(t=>t.stop()); micStream=null; if(micContext)await micContext.close().catch(()=>{});micContext=null;throw e;}
 }
@@ -151,19 +151,56 @@ async function endMic(){
   if(micContext)await micContext.close().catch(()=>{});
   micContext=null;micSource=null;micNode=null;
   $('mic-btn').disabled=true;$('mic-btn').textContent='正在提交剩余录音…';
-  $('live-model').disabled=false;$('live-lang').disabled=false;
+  $('live-model').disabled=false;$('live-lang').disabled=false;$('live-source').disabled=false;
   $('live-message').textContent=`麦克风已停止。剩余待提交：${pending.length} 段，后台转写仍可能继续。`;
   await drain();
   $('mic-btn').textContent='开始新的监听';
   $('live-state').textContent='已停止，麦克风已关闭';
 }
+function micTokenHeaders(){
+  const token=$('mic-token').value.trim();
+  if(!token)throw Error('请先输入主机麦克风控制口令');
+  return {...headers,'X-Whisper-Mic-Token':token};
+}
+async function beginServerMic(){
+  const s=await request('/api/server-mic/start',{method:'POST',headers:{...micTokenHeaders(),'Content-Type':'application/json'},body:JSON.stringify({model:$('live-model').value,language:$('live-lang').value})});
+  liveSession=s.id;serverMonitoring=true;
+  $('live-source').disabled=true;$('live-model').disabled=true;$('live-lang').disabled=true;
+  $('mic-btn').textContent='停止主机监听并生成字幕';
+  $('live-message').textContent='Ubuntu 主机正在采集声音；关闭网页不会停止监听。';
+}
+async function endServerMic(){
+  await request('/api/server-mic/stop',{method:'POST',headers:micTokenHeaders()});
+  serverMonitoring=false;
+  $('live-source').disabled=false;$('live-model').disabled=false;$('live-lang').disabled=false;
+  $('mic-btn').textContent='开始新的监听';
+  $('live-message').textContent='主机麦克风已关闭，已提交的声音片段仍可能在后台转写。';
+}
+$('live-source').onchange=()=>{
+  const host=$('live-source').value==='host';
+  $('host-token-field').classList.toggle('hidden',!host);
+  $('sensitivity-row').classList.toggle('hidden',host);
+  $('mic-btn').textContent=host?'开启主机麦克风监听':'开启浏览器麦克风监听';
+};
 $('mic-btn').onclick=async()=>{
   $('mic-btn').disabled=true;
-  try{if(monitoring)await endMic();else await beginMic();}
-  catch(e){$('live-message').textContent='麦克风启动失败：'+e.message;}
+  try{
+    if(serverMonitoring)await endServerMic();
+    else if(monitoring)await endMic();
+    else if($('live-source').value==='host')await beginServerMic();
+    else await beginMic();
+  }
+  catch(e){$('live-message').textContent='麦克风操作失败：'+e.message;}
   finally{if(!stopping)$('mic-btn').disabled=false;}
 };
-$('mic-calibrate').onclick=()=>{if(gate){gate.recalibrate();$('live-message').textContent='已开始重新校准环境底噪（1.4 秒）。';}};
+$('mic-calibrate').onclick=async()=>{
+  try{
+    if(serverMonitoring)await request('/api/server-mic/calibrate',{method:'POST',headers:micTokenHeaders()});
+    else if(gate)gate.recalibrate();
+    else return;
+    $('live-message').textContent='已开始重新校准环境底噪（1.4 秒）。';
+  }catch(e){$('live-message').textContent='重新校准失败：'+e.message;}
+};
 $('sensitivity').oninput=()=>{const x=+$('sensitivity').value;if(gate)gate.sensitivityDb=x;$('sensitivity-label').textContent=`高于背景 ${x} dB（数值越小越灵敏）`;};
 async function refreshLive(){
   if(!liveSession)return;
@@ -176,6 +213,25 @@ async function refreshLive(){
     if(d.failed||d.dropped)$('live-message').textContent=`已转写 ${d.completed}/${d.submitted} 段，提交失败 ${d.failed} 段，丢失 ${d.dropped||0} 段：${d.last_error||''}`;
   }catch(e){}
 }
+async function refreshServerMic(){
+  if($('live-source').value!=='host'||!$('mic-token').value.trim())return;
+  try{
+    const d=await request('/api/server-mic/status',{headers:micTokenHeaders()});
+    const active=['calibrating','silent','recording'].includes(d.status);
+    if(d.session_id&&!liveSession)liveSession=d.session_id;
+    if(active){
+      liveSession=d.session_id;serverMonitoring=true;
+      $('live-source').disabled=true;$('live-model').disabled=true;$('live-lang').disabled=true;
+      $('mic-btn').textContent='停止主机监听并生成字幕';
+    }else if(serverMonitoring){
+      serverMonitoring=false;
+      $('live-source').disabled=false;$('live-model').disabled=false;$('live-lang').disabled=false;
+      $('mic-btn').textContent='开始新的监听';
+    }
+    if(active||d.status==='failed'||(d.status==='stopped'&&liveSession===d.session_id))micState(d.status,{levelDb:d.level_db,noiseDb:d.noise_db,thresholdDb:d.threshold_db,elapsed:d.elapsed_seconds});
+    if(d.error)$('live-message').textContent='主机麦克风失败：'+d.error;
+  }catch(e){$('live-message').textContent='主机麦克风状态检查失败：'+e.message;}
+}
 $('live-downloads').addEventListener('click',async e=>{
   if(!e.target.closest('[data-erase-session]')||!liveSession)return;
   try{
@@ -186,6 +242,6 @@ $('live-downloads').addEventListener('click',async e=>{
     $('live-message').textContent='本次会话转录文本已从服务端删除。';
   }catch(error){$('live-message').textContent='删除失败：'+error.message;}
 });
-async function tick(){try{const h=await request('/api/health');$('health').textContent=`本地运行 · ${h.threads} CPU 线程`;$('health').classList.add('ok');}catch(e){$('health').textContent='服务断开';$('health').classList.remove('ok');}await Promise.all([refreshJobs(),refreshLive()]);}
+async function tick(){try{const h=await request('/api/health');$('health').textContent=`本地运行 · ${h.threads} CPU 线程`;$('health').classList.add('ok');}catch(e){$('health').textContent='服务断开';$('health').classList.remove('ok');}await Promise.all([refreshJobs(),refreshLive(),refreshServerMic()]);}
 window.addEventListener('pagehide',()=>{micStream?.getTracks().forEach(t=>t.stop());});
 tick();setInterval(tick,2600);

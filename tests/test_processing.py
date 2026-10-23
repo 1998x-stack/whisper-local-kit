@@ -17,6 +17,18 @@ class FakeModel:
 
 
 class ProcessingTests(unittest.TestCase):
+    def test_chinese_transcription_uses_simplified_characters(self):
+        model = FakeModel()
+        traditional = {
+            "language": "zh",
+            "text": "因為我聽過胡星樹的課",
+            "segments": [{"start": 0, "end": 2, "text": "因為我聽過胡星樹的課"}],
+        }
+        with patch.object(model, "transcribe", return_value=traditional):
+            result = decode_file(model, Path("sample.mp3"), "zh")
+        self.assertEqual(result["text"], "因为我听过胡星树的课")
+        self.assertEqual(result["segments"][0]["text"], "因为我听过胡星树的课")
+
     def test_greedy_and_retry_only_for_offline(self):
         model = FakeModel()
         decode_file(model, Path("a.wav"), "zh", live=False)
