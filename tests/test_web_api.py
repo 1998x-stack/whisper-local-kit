@@ -6,6 +6,7 @@ import unittest
 import wave
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import main
@@ -78,6 +79,24 @@ class APITests(unittest.TestCase):
                     time.sleep(.03)
                 self.assertEqual(j2['skipped_files'],1,j2)
                 self.assertEqual((folder/'lesson.srt').read_text(), 'never overwrite')
+                with patch('app.main.shutil.which', return_value='/usr/bin/ffprobe'):
+                    upload=c.post('/api/transcribe', headers=h,
+                                  files={'file':('test.wav',wav_bytes(),'audio/wav')},
+                                  data={'model':'tiny','language':'zh','task':'transcribe'})
+                self.assertEqual(upload.status_code,202,upload.text)
+                uid=upload.json()['id']
+                for _ in range(100):
+                    uploaded=c.get(f'/api/jobs/{uid}').json()
+                    if uploaded['status'] in ('complete','failed'):break
+                    time.sleep(.03)
+                self.assertEqual(uploaded['status'],'complete',uploaded)
+                self.assertIn('real_time_factor',uploaded)
+                preview=c.get('/api/jobs').json()
+                self.assertTrue(any(j['id']==uid and 'text_preview' in j and 'text' not in j for j in preview))
+                response=c.get(f'/api/jobs/{uid}/download/json')
+                self.assertEqual(response.status_code,200,response.text)
+                self.assertIn('unfiltered_segments',response.json())
+                self.assertEqual(c.get('/api/jobs').headers.get('cache-control'),'no-store')
                 # Deletion requires the local request marker.
                 self.assertEqual(c.delete(f'/api/jobs/{jid2}').status_code,403)
                 self.assertEqual(c.delete(f'/api/jobs/{jid2}',headers=h).status_code,200)
