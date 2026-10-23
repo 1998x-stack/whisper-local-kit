@@ -49,11 +49,12 @@ class APITests(unittest.TestCase):
                 self.assertEqual(status['completed'],1,status)
                 srt=c.get(f'/api/live/{sid}/download/srt').text
                 self.assertIn('00:01:01,200 --> 00:01:02,100',srt)
-                self.assertEqual(c.get('/api/live/'+sid+'?tail=1').status_code,200)
+                self.assertEqual(len(c.get('/api/live/'+sid+'?tail=1').json()['segments']),1)
                 gap=c.post(f'/api/live/{sid}/gaps', headers=h,
                            json={'offset_seconds':70.0,'duration_seconds':1.0})
                 self.assertEqual(gap.status_code,202,gap.text)
                 self.assertIn('未转写',c.get(f'/api/live/{sid}/download/srt').text)
+                self.assertEqual(len(c.get(f'/api/live/{sid}?tail=1').json()['segments']),1)
                 # Individual live clips are not shown as upload jobs.
                 self.assertFalse(any(j.get('kind')=='live' for j in c.get('/api/jobs').json()))
                 folder=Path(root)/'audios';folder.mkdir()
