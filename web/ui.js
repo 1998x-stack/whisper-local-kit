@@ -50,6 +50,7 @@ async function refreshJobs(){
 
 let liveSession=null, micStream=null, micContext=null, micSource=null, micNode=null, gate=null;
 let monitoring=false, sending=false, stopping=false, pending=[], dropped=0;
+let drainPromise=null, gapWrites=[];
 function micState(state,stats){
   $('mic-orb').className=`orb ${state==='recording'?'recording':state==='calibrating'?'calibrating':'silent'}`;
   $('mic-glyph').textContent=state==='recording'?'●':'◌';
@@ -59,31 +60,62 @@ function micState(state,stats){
   $('meter-label').textContent=`当前 ${stats.levelDb} dBFS · 触发阈值 ${stats.thresholdDb} dBFS · 背景 ${stats.noiseDb} dBFS`;
   $('elapsed').textContent=fmt(stats.elapsed);
 }
+function markGap(clip){
+  if(!liveSession)return;
+  const p=request('/api/live/'+liveSession+'/gaps',{
+    method:'POST',headers:{...headers,'Content-Type':'application/json'},
+    body:JSON.stringify({offset_seconds:clip.startSeconds,duration_seconds:clip.durationSeconds})
+  }).catch(e=>{$('live-message').textContent='未提交时间段标记失败：'+e.message;});
+  gapWrites.push(p);
+}
 function liveClip(clip){
-  if(pending.length>=12){dropped++;$('live-message').textContent=`CPU 转写速度落后，已有 ${dropped} 段未提交；建议改用 tiny 或稍后上传完整录音。`;return;}
+  if(pending.length>=12){dropped++;markGap(clip);$('live-message').textContent=`CPU 转写速度落后，已有 ${dropped} 段未提交；字幕时间轴已标记缺口。`;return;}
   pending.push({...clip,blob:encodeWav(clip.samples,clip.sampleRate)});
   $('live-message').textContent=`采集 ${clip.startSeconds.toFixed(1)}–${(clip.startSeconds+clip.durationSeconds).toFixed(1)}s · 本地等待上传 ${pending.length} 段`;
   drain();
 }
-async function drain(){
-  if(sending||!liveSession)return;
+function drain(){
+  if(drainPromise)return drainPromise;
+  if(!liveSession)return Promise.resolve();
   sending=true;
-  try{
-    while(pending.length){
-      const c=pending[0];const fd=new FormData();fd.append('file',c.blob,'mic.wav');fd.append('offset_seconds',String(c.startSeconds));fd.append('duration_seconds',String(c.durationSeconds));
-      try{
-        await request(`/api/live/${liveSession}/chunks`,{method:'POST',headers,body:fd});
-        pending.shift();
-      }catch(e){
-        if(String(e.message).includes('队列已满')) {await new Promise(r=>setTimeout(r,2500));continue;}
-        pending.shift();dropped++;
-        $('live-message').textContent=`音频片段提交失败：${e.message}，丢失段数 ${dropped}`;
+  drainPromise=(async()=>{
+    try{
+      while(pending.length){
+        const c=pending[0];
+        const fd=new FormData();
+        fd.append('file',c.blob,'mic.wav');
+        fd.append('offset_seconds',String(c.startSeconds));
+        fd.append('duration_seconds',String(c.durationSeconds));
+        try{
+          await request('/api/live/'+liveSession+'/chunks',{method:'POST',headers,body:fd});
+          pending.shift();
+        }catch(e){
+          if(String(e.message).includes('队列已满')){
+            await new Promise(resolve=>setTimeout(resolve,2500));
+            continue;
+          }
+          pending.shift();
+          dropped++;
+          markGap(c);
+          $('live-message').textContent='音频片段提交失败：'+e.message+'，丢失段数 '+dropped;
+        }
+      }
+    }finally{
+      sending=false;
+      if(stopping){
+        await Promise.allSettled(gapWrites);
+        gapWrites=[];
+        try{
+          await request('/api/live/'+liveSession+'/stop',{method:'POST',headers});
+        }catch(e){
+          $('live-message').textContent='结束会话状态同步失败：'+e.message;
+        }
+        stopping=false;
+        $('mic-btn').disabled=false;
       }
     }
-  }finally{sending=false;if(stopping){
-    try{await request(`/api/live/${liveSession}/stop`,{method:'POST',headers});}catch(e){}
-    stopping=false;$('mic-btn').disabled=false;
-  }}
+  })().finally(()=>{drainPromise=null;});
+  return drainPromise;
 }
 async function beginMic(){
   if(!navigator.mediaDevices?.getUserMedia||!window.AudioWorkletNode) throw Error('浏览器不支持安全上下文中的 AudioWorklet 麦克风录制。请使用最新版 Chrome / Firefox 的 localhost 页面。');
@@ -99,7 +131,7 @@ async function beginMic(){
     micNode.port.onmessage=e=>gate?.push(e.data);
     micSource.connect(micNode);micNode.connect(micContext.destination);
     await micContext.resume();
-    monitoring=true;pending=[];dropped=0;
+    monitoring=true;pending=[];dropped=0;gapWrites=[];
     $('mic-btn').textContent='停止监听并生成字幕';
     $('live-model').disabled=true;$('live-lang').disabled=true;
     $('live-message').textContent='已请求麦克风权限。仅在检测到声音时发送录音片段给本机 Whisper。';
@@ -132,7 +164,7 @@ async function refreshLive(){
     const timeline=$('live-transcript');
     timeline.innerHTML=d.segments?.length?d.segments.slice(-80).map(s=>`<p><time>${fmt(s.start)}</time>${escapeHTML(s.text)}</p>`).join(''):'<span class="muted">尚无转写内容。声音片段会排队由 CPU 处理。</span>';
     $('live-downloads').innerHTML=`${['srt','txt','vtt','json'].map(f=>`<a href="/api/live/${encodeURIComponent(liveSession)}/download/${f}">保存完整 ${f.toUpperCase()}</a>`).join('')}`;
-    if(d.failed)$('live-message').textContent=`已转写 ${d.completed}/${d.submitted} 段，失败 ${d.failed} 段：${d.last_error||''}`;
+    if(d.failed||d.dropped)$('live-message').textContent=`已转写 ${d.completed}/${d.submitted} 段，提交失败 ${d.failed} 段，丢失 ${d.dropped||0} 段：${d.last_error||''}`;
   }catch(e){}
 }
 async function tick(){try{const h=await request('/api/health');$('health').textContent=`本地运行 · ${h.threads} CPU 线程`;$('health').classList.add('ok');}catch(e){$('health').textContent='服务断开';$('health').classList.remove('ok');}await Promise.all([refreshJobs(),refreshLive()]);}
