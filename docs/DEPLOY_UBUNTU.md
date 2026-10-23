@@ -86,6 +86,8 @@ systemctl --user restart whisper-local.service
 systemctl --user disable --now whisper-local.service
 ```
 
+安装时自动将检测到的 Python 绝对路径写入用户服务，因此不依赖 systemd 是否能找到 Conda。迁移或重建 Conda/.venv 环境后，必须重新运行 `bash scripts/install-user-service.sh`。
+
 服务依赖本项目 `scripts/run.sh`，不固定个人 Miniconda 安装路径。**这是用户服务**：Ubuntu 桌面登录后运行；非登录服务器环境请先了解 systemd linger 与系统服务的区别。应用自身是单进程、单执行队列，不要配置多个 uvicorn worker 以免重复消费或重复模型内存。
 
 ## 5. 远程安全
