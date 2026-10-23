@@ -185,6 +185,27 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
             persist_session(sessions[sid])
         return {"status": "stopped"}
 
+    @app.delete("/api/live/{sid}")
+    def delete_live(
+        sid: str,
+        x_local_whisper_client: str | None = Header(None, alias="X-Local-Whisper-Client"),
+    ) -> dict[str, bool]:
+        check_header(x_local_whisper_client)
+        get_session(sid)
+        with ctx["lock"]:
+            pending = any(j.get("session_id") == sid and
+                          j["status"] in {"uploading", "queued", "running"}
+                          for j in ctx["jobs"].values())
+        if pending:
+            raise HTTPException(409, "仍有待处理片段，无法删除会话")
+        with SESSION_LOCK:
+            if sessions[sid]["status"] != "stopped":
+                raise HTTPException(409, "请先停止监听")
+            sessions.pop(sid, None)
+            import shutil
+            shutil.rmtree(session_location(sid), ignore_errors=True)
+        return {"deleted": True}
+
     @app.get("/api/live/{sid}/download/{fmt}")
     def download_live(sid: str, fmt: str) -> Response:
         if fmt not in {"txt", "srt", "vtt", "json"}:
