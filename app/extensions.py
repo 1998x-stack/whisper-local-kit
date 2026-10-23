@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
+from .processing import decode_file, simple_segments, atomic_text
 from pydantic import BaseModel, Field
 
 from .subtitles import to_srt, to_vtt
@@ -26,7 +27,7 @@ sessions: dict[str, dict[str, Any]] = {}
 
 def allowed_roots() -> list[Path]:
     configured = os.getenv("WHISPER_BATCH_ROOTS", "")
-    values = configured.split(":") if configured else [str(Path.home())]
+    values = configured.split(":") if configured else [str(Path.home() / "Music"), str(Path.home() / "Downloads"), "/mnt/sda4"]
     return [p for v in values if v.strip() if (p := Path(v).expanduser().resolve()).is_dir()]
 
 
@@ -36,6 +37,8 @@ def safe_directory(value: str, *, create: bool = False) -> Path:
     candidate = Path(value).expanduser().resolve()
     if not any(candidate == root or candidate.is_relative_to(root) for root in allowed_roots()):
         raise HTTPException(403, "文件夹不在允许的本地目录中（默认：用户主目录或 /mnt/sda4）")
+    if any(part.startswith(".") for part in candidate.parts[1:]):
+        raise HTTPException(403, "为安全起见，批处理路径不允许隐藏目录")
     if create:
         try:
             candidate.mkdir(parents=True, exist_ok=True)
@@ -49,7 +52,11 @@ def safe_directory(value: str, *, create: bool = False) -> Path:
 def list_mp3(directory: Path, recursive: bool) -> list[Path]:
     iterator = directory.rglob("*") if recursive else directory.iterdir()
     files = []
+    scanned = 0
     for p in iterator:
+        scanned += 1
+        if scanned > 20000:
+            raise HTTPException(400, "扫描超过 20000 个目录条目，请缩小范围")
         if p.suffix.lower() != ".mp3" or not p.is_file():
             continue
         resolved = p.resolve()
@@ -66,32 +73,6 @@ def safe_output(path: Path, output_root: Path) -> bool:
     return parent.is_relative_to(output_root) and not path.is_symlink()
 
 
-def simple_segments(result: dict[str, Any], offset: float = 0.0, duration: float | None = None) -> list[dict[str, Any]]:
-    out = []
-    for item in result.get("segments", []):
-        text = str(item.get("text", "")).strip()
-        if not text:
-            continue
-        start = max(0.0, float(item.get("start", 0)))
-        end = max(start, float(item.get("end", start)))
-        if duration is not None:
-            start = min(start, duration)
-            end = min(end, duration)
-        if end <= start:
-            continue
-        out.append({"start": round(start + offset, 3), "end": round(end + offset, 3), "text": text})
-    return out
-
-
-def atomic_text(path: Path, content: str) -> None:
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
-    try:
-        temporary.write_text(content, encoding="utf-8")
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 class BatchRequest(BaseModel):
     input_directory: str = Field(min_length=1, max_length=1024)
     output_directory: str | None = Field(default=None, max_length=1024)
@@ -101,12 +82,34 @@ class BatchRequest(BaseModel):
     language: str = "zh"
 
 
+def prune_sessions(data_root: Path, cutoff: float) -> None:
+    directory = data_root / "live"
+    if not directory.is_dir():
+        return
+    with SESSION_LOCK:
+        for folder in directory.iterdir():
+            if not folder.is_dir() or folder.is_symlink():
+                continue
+            try:
+                uuid.UUID(folder.name)
+                meta = folder / "session.json"
+                if meta.is_file() and meta.stat().st_mtime < cutoff:
+                    import shutil
+                    sessions.pop(folder.name, None)
+                    shutil.rmtree(folder)
+            except (OSError, ValueError):
+                continue
+
+
 def register(app: Any, ctx: dict[str, Any]) -> None:
     """Extend original v1 app while reusing its single shared Whisper CPU worker."""
     def job_create(kind: str, name: str, model: str, language: str, **data: Any) -> str:
         with ctx["lock"]:
-            outstanding = sum(j["status"] in {"uploading", "queued", "running"} for j in ctx["jobs"].values())
-            if outstanding >= ctx["MAX_OUTSTANDING"]:
+            outstanding = sum(j["status"] in {"uploading", "queued", "running"}
+                              and (j.get("kind") == "live") == (kind == "live")
+                              for j in ctx["jobs"].values())
+            cap = 8 if kind == "live" else ctx["MAX_OUTSTANDING"]
+            if outstanding >= cap:
                 raise HTTPException(429, "CPU 任务队列已满，稍后重试")
             jid = str(uuid.uuid4())
             stamp = ctx["utcnow"]()
@@ -178,13 +181,12 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
         return {"status": "stopped"}
 
     @app.get("/api/live/{sid}/download/{fmt}")
-    def download_live(sid: str, fmt: str) -> FileResponse:
+    def download_live(sid: str, fmt: str) -> Response:
         if fmt not in {"txt", "srt", "vtt", "json"}:
             raise HTTPException(404, "不支持的格式")
         s = get_session(sid)
         segments = sorted(s["segments"], key=lambda v: (v["start"], v["end"]))
-        folder = session_location(sid)
-        filename = folder / f"transcript.{fmt}"
+        filename = f"live-{sid[:8]}.{fmt}"
         if fmt == "srt":
             content = to_srt(segments)
         elif fmt == "vtt":
@@ -193,18 +195,19 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
             content = json.dumps({"session_id": sid, "segments": segments}, ensure_ascii=False, indent=2)
         else:
             content = "\n".join(x["text"] for x in segments) + ("\n" if segments else "")
-        atomic_text(filename, content)
-        return FileResponse(filename, filename=f"live-{sid[:8]}.{fmt}")
+        media_type = "application/json" if fmt == "json" else "text/plain; charset=utf-8"
+        return Response(content, media_type=media_type,
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
     def run_live(jid: str, file: Path, model: str, language: str, sid: str, offset: float, duration: float) -> None:
         try:
             ctx["update"](jid, status="running", stage="监听片段转写中")
-            ctx["probe_audio"](file)
+            actual_duration = ctx["probe_audio"](file)
+            if abs(actual_duration - duration) > 0.6:
+                raise ValueError("片段音频时长与客户端声明不一致")
             engine = ctx["load_model"](model)
-            result = engine.transcribe(str(file), language=ctx["LANGUAGE_CHOICES"][language], task="transcribe",
-                                       fp16=False, verbose=None, temperature=0, beam_size=1, best_of=1,
-                                       condition_on_previous_text=False)
-            segments = simple_segments(result, offset=offset, duration=duration)
+            result = decode_file(engine, file, ctx["LANGUAGE_CHOICES"][language], live=True)
+            segments = simple_segments(result, offset=offset, duration=actual_duration)
             with SESSION_LOCK:
                 s = sessions[sid]
                 s["segments"].extend(segments)
@@ -254,7 +257,7 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
             with SESSION_LOCK:
                 sessions[sid]["submitted"] += 1
                 persist_session(sessions[sid])
-            ctx["executor"].submit(run_live, jid, path, s["model"], s["language"], sid, offset_seconds, duration_seconds)
+            ctx["executor"].submit(run_live, jid, path, s["model"], s["language"], sid, offset_seconds, duration_seconds, priority=0)
             return {"id": jid, "status": "queued"}
         except Exception:
             path.unlink(missing_ok=True)
@@ -264,43 +267,59 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
             await file.close()
 
     def run_batch(jid: str, files: list[Path], inp: Path, out: Path, model: str, lang: str, skip_existing: bool) -> None:
-        ok = fail = skipped = 0
-        detail = []
-        try:
-            ctx["update"](jid, status="running", stage="加载 Whisper 模型", total_files=len(files))
-            engine = ctx["load_model"](model)
-            for idx, source in enumerate(files, 1):
-                rel = source.relative_to(inp).with_suffix(".srt")
-                destination = out / rel
-                ctx["update"](jid, stage=f"[{idx}/{len(files)}] {source.name}", completed_files=ok,
-                              failed_files=fail, skipped_files=skipped)
-                try:
-                    # Do not allow input symlinks to escape their approved base path.
-                    if not source.resolve().is_relative_to(inp):
-                        raise ValueError("文件链接指向扫描目录之外")
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    if not safe_output(destination, out):
-                        raise ValueError("输出路径包含不安全的符号链接")
-                    if skip_existing and destination.exists():
-                        skipped += 1
-                        continue
+        # One MP3 per task lets live and upload requests preempt the *next* file,
+        # while keeping inference strictly serialized on low-end CPUs.
+        state: dict[str, Any] = {"index": 0, "ok": 0, "fail": 0,
+                                 "skipped": 0, "no_speech": 0, "detail": []}
+
+        def step() -> None:
+            idx = state["index"]
+            if idx >= len(files):
+                failures = state["fail"]
+                status = "completed_with_errors" if failures and (
+                    state["ok"] or state["skipped"] or state["no_speech"]) else (
+                        "failed" if failures else "complete")
+                ctx["update"](jid, status=status, stage="批量处理结束",
+                              completed_files=state["ok"], failed_files=failures,
+                              skipped_files=state["skipped"], no_speech_files=state["no_speech"],
+                              errors=state["detail"][:100])
+                return
+            source = files[idx]
+            rel = source.relative_to(inp).with_suffix(".srt")
+            destination = out / rel
+            state["index"] += 1
+            ctx["update"](jid, status="running", stage=f"[{idx + 1}/{len(files)}] {source.name}",
+                          completed_files=state["ok"], failed_files=state["fail"],
+                          skipped_files=state["skipped"], no_speech_files=state["no_speech"])
+            try:
+                if not source.resolve().is_relative_to(inp):
+                    raise ValueError("文件链接指向扫描目录之外")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                marker = destination.with_name(destination.name + ".no-speech")
+                if not safe_output(destination, out) or not safe_output(marker, out):
+                    raise ValueError("输出路径包含不安全的符号链接")
+                if skip_existing and (destination.exists() or marker.exists()):
+                    state["skipped"] += 1
+                else:
                     if source.stat().st_size > ctx["MAX_BYTES"]:
                         raise ValueError("文件超过单文件大小限制")
                     ctx["probe_audio"](source)
-                    result = engine.transcribe(str(source), language=ctx["LANGUAGE_CHOICES"][lang],
-                                               task="transcribe", fp16=False, verbose=None,
-                                               temperature=0, beam_size=1, best_of=1)
+                    engine = ctx["load_model"](model)
+                    result = decode_file(engine, source, ctx["LANGUAGE_CHOICES"][lang])
                     segments = simple_segments(result)
-                    atomic_text(destination, to_srt(segments))
-                    ok += 1
-                except Exception as exc:
-                    fail += 1
-                    detail.append({"file": str(rel), "error": str(exc)[:200]})
-            ctx["update"](jid, status="complete" if not fail or ok or skipped else "failed", stage="批量处理结束",
-                          completed_files=ok, failed_files=fail, skipped_files=skipped,
-                          errors=detail[:100])
-        except Exception as exc:
-            ctx["update"](jid, status="failed", stage="处理失败", error=f"{type(exc).__name__}: {exc}")
+                    if segments:
+                        atomic_text(destination, to_srt(segments))
+                        marker.unlink(missing_ok=True)
+                        state["ok"] += 1
+                    else:
+                        atomic_text(marker, "No speech segments detected; no SRT generated.\n")
+                        state["no_speech"] += 1
+            except Exception as exc:
+                state["fail"] += 1
+                state["detail"].append({"file": str(rel), "error": str(exc)[:200]})
+            ctx["executor"].submit(step, priority=20)
+
+        ctx["executor"].submit(step, priority=20)
 
     @app.post("/api/batch", status_code=202)
     def batch(request: BatchRequest, x_local_whisper_client: str | None = Header(None, alias="X-Local-Whisper-Client")) -> dict[str, Any]:
@@ -315,7 +334,7 @@ def register(app: Any, ctx: dict[str, Any]) -> None:
         jid = job_create("batch", f"批量 MP3 · {inp.name}", request.model, request.language,
                          total_files=len(files), completed_files=0, failed_files=0, skipped_files=0,
                          output_directory=str(out))
-        ctx["executor"].submit(run_batch, jid, files, inp, out, request.model, request.language, request.skip_existing)
+        ctx["executor"].submit(run_batch, jid, files, inp, out, request.model, request.language, request.skip_existing, priority=20)
         return {"id": jid, "total_files": len(files), "output_directory": str(out)}
 
     @app.post("/api/batch/preview")
