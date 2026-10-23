@@ -38,11 +38,11 @@ bash scripts/run.sh
 | `WHISPER_THREADS` | 2 | PyTorch CPU 推理线程（约 1–8） |
 | `WHISPER_MAX_UPLOAD_MB` | 200 | 最大上传文件大小，强制上限 1024 MB |
 | `WHISPER_MAX_DURATION_SECONDS` | 7200 | 最长音频时长（秒） |
-| `WHISPER_MAX_OUTSTANDING` | 3 | 上传、排队、运行任务的总数量上限，1–20 |
+| `WHISPER_MAX_OUTSTANDING` | 3 | 普通上传/批处理队列上限；实时片段另有 8 个名额 |
 | `WHISPER_RETENTION_DAYS` | 7 | 任务历史与转录会话的本地清理天数（1–365） |
 | `WHISPER_DATA_DIR` | `$HOME/.local/share/whisper-local` | 任务元数据与输出文件 |
 | `WHISPER_MODEL_DIR` | `$HOME/.cache/whisper` | Whisper 模型缓存 |
-| `WHISPER_BATCH_ROOTS` | `$HOME` | Web 批处理允许访问的本地文件夹，可用冒号分隔多个目录 |
+| `WHISPER_BATCH_ROOTS` | `~/Music`、`~/Downloads`、`~/Documents` 中存在的目录 | Web 批量处理授权根目录；其他路径需要明确配置，冒号分隔 |
 | `WHISPER_PYTHON` | 自动发现 | 绝对路径指向自定义 Python |
 | `WHISPER_CONDA_ENV` | whisper-cpu | Conda 环境名称 |
 
@@ -130,3 +130,17 @@ systemctl --user start whisper-local.service
 - 本地文件夹的 Web 模式只允许显式授权目录，仍不适合公开网络使用。
 - 内存任务队列不是数据库消息队列；重启时正在进行的任务标记为中断，不能自动续跑。批量处理有同名 SRT 跳过机制，允许重新提交继续未完成工作。
 - 初次下载模型需要网络；部署到完全离线主机时须事先在其他机器缓存模型和依赖。
+
+## 9. v3 性能、正确性与隐私改进
+
+- **调度**：独立 live（最多 8 个排队/运行）与普通任务（默认最多 3 个）预算；优先级为实时监听 > 上传 > 批量。批量处理每个文件后让出 CPU 推理线程。已在解码中的一个文件不可中断。
+- **解码**：统一 greedy（`beam_size=None`）与 `condition_on_previous_text=False`。离线转写使用 `(0, 0.2, 0.4)` 温度回退；实时片段固定 `0`，避免无意义额外解码。
+- **置信度**：`WHISPER_FILTER_LOW_CONFIDENCE=1` 只在 `no_speech_prob >= 0.85` 且 `avg_logprob < -1.2` 同时满足时抑制片段；可设 `0` 关闭。保留得分到 JSON，仍需人工校对。
+- **中文提示**：`WHISPER_ZH_INITIAL_PROMPT` 默认空；可按自己的音频选择简体中文术语提示，错误提示可能适得其反。
+- **批处理无语音**：用 `.srt.no-speech` 标记代替空 SRT；成功与失败混合时为 `completed_with_errors`。
+- **轻量响应**：任务列表隐藏每个 live 子任务，只返回上传与批量任务的前 1000 字文本；完整结果可从单任务 API 获取。
+- **数据保留**：服务运行中每小时清理超过 `WHISPER_RETENTION_DAYS` 的已结束任务与旧会话数据。保留本地原始媒体目录不受影响。
+- **安全**：Web 默认只放行 Music、Downloads、Documents 中存在的目录；禁用隐藏目录访问，并限制每次扫描 20,000 个条目。其他目录显式设置 `WHISPER_BATCH_ROOTS`。
+- **性能核验**：记录上传转写的音频秒数、推理秒数及 RTF。模型引擎仍是 PyTorch CPU；在未测试目标 CPU AVX 兼容性前不自动替换为 CTranslate2。
+
+CI 使用无需下载 Whisper 模型的 stub 测试，不是实际老 CPU 的速度与准确度测量。
