@@ -49,6 +49,13 @@ class APITests(unittest.TestCase):
                 self.assertEqual(status['completed'],1,status)
                 srt=c.get(f'/api/live/{sid}/download/srt').text
                 self.assertIn('00:01:01,200 --> 00:01:02,100',srt)
+                self.assertEqual(c.get('/api/live/'+sid+'?tail=1').status_code,200)
+                gap=c.post(f'/api/live/{sid}/gaps', headers=h,
+                           json={'offset_seconds':70.0,'duration_seconds':1.0})
+                self.assertEqual(gap.status_code,202,gap.text)
+                self.assertIn('未转写',c.get(f'/api/live/{sid}/download/srt').text)
+                # Individual live clips are not shown as upload jobs.
+                self.assertFalse(any(j.get('kind')=='live' for j in c.get('/api/jobs').json()))
                 folder=Path(root)/'audios';folder.mkdir()
                 (folder/'lesson.mp3').write_bytes(b'fake')
                 batch=c.post('/api/batch',headers=h,json={'input_directory':str(folder)})
@@ -70,5 +77,13 @@ class APITests(unittest.TestCase):
                     time.sleep(.03)
                 self.assertEqual(j2['skipped_files'],1,j2)
                 self.assertEqual((folder/'lesson.srt').read_text(), 'never overwrite')
+                # Deletion requires the local request marker.
+                self.assertEqual(c.delete(f'/api/jobs/{jid2}').status_code,403)
+                self.assertEqual(c.delete(f'/api/jobs/{jid2}',headers=h).status_code,200)
+                self.assertEqual(c.get(f'/api/jobs/{jid2}').status_code,404)
+                self.assertEqual(c.delete(f'/api/live/{sid}',headers=h).status_code,409)
+                self.assertEqual(c.post(f'/api/live/{sid}/stop',headers=h).status_code,200)
+                self.assertEqual(c.delete(f'/api/live/{sid}',headers=h).status_code,200)
+                self.assertEqual(c.get(f'/api/live/{sid}').status_code,404)
 
 if __name__ == '__main__': unittest.main()
