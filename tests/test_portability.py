@@ -10,9 +10,17 @@ from fastapi import HTTPException
 
 
 class DeploymentConfigTests(unittest.TestCase):
-    def test_batch_roots_default_only_home(self):
-        with patch.dict(os.environ, {"WHISPER_BATCH_ROOTS": ""}):
-            self.assertEqual(allowed_roots(), [Path.home().resolve()])
+    def test_batch_roots_default_are_narrow_and_portable(self):
+        with tempfile.TemporaryDirectory() as home:
+            base = Path(home)
+            (base / "Music").mkdir()
+            (base / "Downloads").mkdir()
+            with patch("app.extensions.Path.home", return_value=base), \
+                 patch.dict(os.environ, {"WHISPER_BATCH_ROOTS": ""}):
+                self.assertEqual(set(allowed_roots()),
+                                 {(base / "Music").resolve(), (base / "Downloads").resolve()})
+                with self.assertRaises(HTTPException):
+                    safe_directory(str(base))
 
     def test_explicit_batch_root_limits_paths(self):
         with tempfile.TemporaryDirectory() as d:
