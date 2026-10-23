@@ -158,3 +158,7 @@ cat /tmp/whisper-bench.json
 
 该脚本测量模型加载耗时、每轮推理时长、RTF 中位数和 CPU AVX/AVX2 特征。RTF < 1 表示该基准音频平均推理速度快于其录制时长；并不等同于浏览器监听零延迟。音频及转录内容不会写进基准 JSON。
 没有经过目标机器真实基准前，不能保证更换 faster-whisper、whisper.cpp 或量化会加速；没有 AVX2 的旧处理器尤其需要先检查兼容性。
+
+**systemd Python 解析**：安装用户服务时，会把检测到的 Python 绝对路径保存到服务单元环境变量；重建 venv/Conda 后应重新运行 `bash scripts/install-user-service.sh`。
+
+**CI 覆盖**：Ubuntu 22.04/24.04 × Python 3.10/3.11/3.12 进行 stub 模型、JS 与 Shell 语法测试；不代表实测麦克风和老 CPU。
