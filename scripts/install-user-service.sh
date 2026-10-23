@@ -13,6 +13,8 @@ After=default.target
 [Service]
 Type=simple
 WorkingDirectory=$ROOT
+# Absolute Python path survives systemd's minimal PATH.
+Environment="WHISPER_PYTHON=$PYTHON"
 ExecStart=/usr/bin/bash "$ROOT/scripts/run.sh"
 Restart=on-failure
 RestartSec=5
