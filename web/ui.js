@@ -43,11 +43,18 @@ async function refreshJobs(){
     const downloads=j.status==='complete'&&(!j.kind||j.kind==='upload')?`<div class="downloads">${['txt','srt','vtt','json'].map(f=>`<a href="/api/jobs/${encodeURIComponent(j.id)}/download/${f}">${f.toUpperCase()}</a>`).join('')}</div>`:'';
     const preview=j.text_preview?`<div class="preview">${escapeHTML(j.text_preview)}</div>`:'';
     const errors=j.errors?.length?`<div class="error">失败样例：${escapeHTML(j.errors.slice(0,3).map(x=>x.file+': '+x.error).join(' | '))}</div>`:'';
-    return `<div class="job"><div class="jobhead"><b class="jobname">${escapeHTML(j.name)}</b><span class="pill ${escapeHTML(j.status)}">${states[j.status]||escapeHTML(j.status)}</span></div><div class="stage">${escapeHTML(j.stage||'')} ${escapeHTML(suffix)} ${j.error?`<span class="error">${escapeHTML(j.error)}</span>`:''}</div>${preview}${downloads}${errors}</div>`;
+    const remove=['complete','failed','interrupted','completed_with_errors'].includes(j.status)?`<button class="btn outline" data-delete-job="${escapeHTML(j.id)}">删除记录</button>`:'';
+    return `<div class="job"><div class="jobhead"><b class="jobname">${escapeHTML(j.name)}</b><span class="pill ${escapeHTML(j.status)}">${states[j.status]||escapeHTML(j.status)}</span></div><div class="stage">${escapeHTML(j.stage||'')} ${escapeHTML(suffix)} ${j.error?`<span class="error">${escapeHTML(j.error)}</span>`:''}</div>${preview}${downloads}${errors}${remove}</div>`;
   }).join('');
   }catch(e){/* leave prior status visible */}
 }
 
+$('jobs').addEventListener('click',async e=>{
+  const id=e.target.closest('[data-delete-job]')?.dataset.deleteJob;
+  if(!id)return;
+  try{await request('/api/jobs/'+encodeURIComponent(id),{method:'DELETE',headers});await refreshJobs();}
+  catch(error){$('health').textContent='删除失败：'+error.message;}
+});
 let liveSession=null, micStream=null, micContext=null, micSource=null, micNode=null, gate=null;
 let monitoring=false, sending=false, stopping=false, pending=[], dropped=0;
 let drainPromise=null, gapWrites=[];
@@ -161,13 +168,24 @@ $('sensitivity').oninput=()=>{const x=+$('sensitivity').value;if(gate)gate.sensi
 async function refreshLive(){
   if(!liveSession)return;
   try{
-    const d=await request(`/api/live/${liveSession}`);
+    const d=await request(`/api/live/${liveSession}?tail=80`);
     const timeline=$('live-transcript');
     timeline.innerHTML=d.segments?.length?d.segments.slice(-80).map(s=>`<p><time>${fmt(s.start)}</time>${escapeHTML(s.text)}</p>`).join(''):'<span class="muted">尚无转写内容。声音片段会排队由 CPU 处理。</span>';
-    $('live-downloads').innerHTML=`${['srt','txt','vtt','json'].map(f=>`<a href="/api/live/${encodeURIComponent(liveSession)}/download/${f}">保存完整 ${f.toUpperCase()}</a>`).join('')}`;
+    const erase=d.status==='stopped'?'<button class="btn outline" data-erase-session="1">删除本次会话记录</button>':'';
+    $('live-downloads').innerHTML=`${['srt','txt','vtt','json'].map(f=>`<a href="/api/live/${encodeURIComponent(liveSession)}/download/${f}">保存完整 ${f.toUpperCase()}</a>`).join('')}`+erase;
     if(d.failed||d.dropped)$('live-message').textContent=`已转写 ${d.completed}/${d.submitted} 段，提交失败 ${d.failed} 段，丢失 ${d.dropped||0} 段：${d.last_error||''}`;
   }catch(e){}
 }
+$('live-downloads').addEventListener('click',async e=>{
+  if(!e.target.closest('[data-erase-session]')||!liveSession)return;
+  try{
+    await request('/api/live/'+liveSession,{method:'DELETE',headers});
+    liveSession=null;
+    $('live-transcript').textContent='已删除本次会话。';
+    $('live-downloads').innerHTML='';
+    $('live-message').textContent='本次会话转录文本已从服务端删除。';
+  }catch(error){$('live-message').textContent='删除失败：'+error.message;}
+});
 async function tick(){try{const h=await request('/api/health');$('health').textContent=`本地运行 · ${h.threads} CPU 线程`;$('health').classList.add('ok');}catch(e){$('health').textContent='服务断开';$('health').classList.remove('ok');}await Promise.all([refreshJobs(),refreshLive()]);}
 window.addEventListener('pagehide',()=>{micStream?.getTracks().forEach(t=>t.stop());});
 tick();setInterval(tick,2600);
