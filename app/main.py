@@ -287,12 +287,15 @@ def process_job(job_id: str, input_path: Path, model_name: str, language: str, t
         result = decode_file(model, input_path, LANGUAGE_CHOICES[language], task=task)
         inference_seconds = time.monotonic() - started
         segments = simple_segments(result)
+        raw_segments = simple_segments(result, filter_low_confidence=False)
         text = transcript_text(result, segments)
         (folder / "result.txt").write_text(text + ("\n" if text else ""), encoding="utf-8")
         (folder / "result.srt").write_text(to_srt(segments), encoding="utf-8")
         (folder / "result.vtt").write_text(to_vtt(segments), encoding="utf-8")
         (folder / "result.json").write_text(
-            json.dumps({"text": text, "language": result.get("language"), "segments": segments}, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps({"text": text, "language": result.get("language"), "segments": segments,
+                        "unfiltered_segments": raw_segments,
+                        "suppressed_segments_count": len(raw_segments) - len(segments)}, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         rtf = round(inference_seconds / duration, 3)
         logger.info("transcribed job=%s model=%s audio_s=%.2f inference_s=%.2f rtf=%.3f",
