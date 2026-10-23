@@ -18,6 +18,11 @@ Restart=on-failure
 RestartSec=5
 UMask=0077
 NoNewPrivileges=true
+Nice=10
+CPUWeight=50
+IOSchedulingClass=idle
+MemoryMax=8G
+TasksMax=128
 
 [Install]
 WantedBy=default.target
