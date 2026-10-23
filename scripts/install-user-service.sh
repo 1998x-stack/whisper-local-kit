@@ -13,6 +13,8 @@ After=default.target
 [Service]
 Type=simple
 WorkingDirectory=$ROOT
+# Resolved at install time: systemd need not find conda in its PATH.
+Environment="WHISPER_PYTHON=$PYTHON"
 ExecStart=/usr/bin/bash "$ROOT/scripts/run.sh"
 Restart=on-failure
 RestartSec=5
