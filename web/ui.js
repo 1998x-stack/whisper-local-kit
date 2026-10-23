@@ -156,6 +156,7 @@ $('mic-btn').onclick=async()=>{
   catch(e){$('live-message').textContent='麦克风启动失败：'+e.message;}
   finally{if(!stopping)$('mic-btn').disabled=false;}
 };
+$('mic-calibrate').onclick=()=>{if(gate){gate.recalibrate();$('live-message').textContent='已开始重新校准环境底噪（1.4 秒）。';}};
 $('sensitivity').oninput=()=>{const x=+$('sensitivity').value;if(gate)gate.sensitivityDb=x;$('sensitivity-label').textContent=`高于背景 ${x} dB（数值越小越灵敏）`;};
 async function refreshLive(){
   if(!liveSession)return;
