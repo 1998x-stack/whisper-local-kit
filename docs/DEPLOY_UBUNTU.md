@@ -144,3 +144,17 @@ systemctl --user start whisper-local.service
 - **性能核验**：记录上传转写的音频秒数、推理秒数及 RTF。模型引擎仍是 PyTorch CPU；在未测试目标 CPU AVX 兼容性前不自动替换为 CTranslate2。
 
 CI 使用无需下载 Whisper 模型的 stub 测试，不是实际老 CPU 的速度与准确度测量。
+
+## 10. 在真实 Ubuntu 上测量 RTF（不要用其他机器的推测值）
+
+在完成安装并缓存 tiny/base 模型之后：
+
+```bash
+cd ~/apps/whisper-local-kit
+# 使用实际录制、已获授权的 30–60 秒样本
+.venv/bin/python scripts/bench.py --audio ~/Music/sample.wav --models tiny base --repeat 2 --output /tmp/whisper-bench.json
+cat /tmp/whisper-bench.json
+```
+
+该脚本测量模型加载耗时、每轮推理时长、RTF 中位数和 CPU AVX/AVX2 特征。RTF < 1 表示该基准音频平均推理速度快于其录制时长；并不等同于浏览器监听零延迟。音频及转录内容不会写进基准 JSON。
+没有经过目标机器真实基准前，不能保证更换 faster-whisper、whisper.cpp 或量化会加速；没有 AVX2 的旧处理器尤其需要先检查兼容性。
