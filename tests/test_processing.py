@@ -41,6 +41,7 @@ class ProcessingTests(unittest.TestCase):
         self.assertAlmostEqual(segments[0]["start"], 20.1)
         self.assertEqual(segments[0]["avg_logprob"], -0.5)
         self.assertEqual(transcript_text(result, segments), "speech valid")
+        self.assertEqual(len(simple_segments(result, filter_low_confidence=False)), 3)
         with patch.dict(os.environ, {"WHISPER_FILTER_LOW_CONFIDENCE": "0"}):
             self.assertEqual(len(simple_segments(result)), 3)
 
