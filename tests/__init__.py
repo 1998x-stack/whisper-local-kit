@@ -1,0 +1,1 @@
+"""Whisper Local regression tests."""
