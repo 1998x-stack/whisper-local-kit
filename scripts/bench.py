@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import platform
+import sys
 import statistics
 import subprocess
 import time
