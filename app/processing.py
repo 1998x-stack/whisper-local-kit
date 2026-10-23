@@ -20,19 +20,22 @@ def decode_file(model: Any, path: Path, language: str | None, *, task: str = "tr
     return model.transcribe(str(path), **options)
 
 
-def simple_segments(result: dict[str, Any], offset: float = 0.0, duration: float | None = None) -> list[dict[str, Any]]:
+def simple_segments(result: dict[str, Any], offset: float = 0.0, duration: float | None = None,
+                    filter_low_confidence: bool | None = None) -> list[dict[str, Any]]:
     """Apply conservative silence filtering while retaining confidence fields.
 
     Never exclude a segment on no_speech_prob alone: the score is not calibrated
     for all microphones, accents or engines, and the JSON assists manual review.
     """
+    enabled = (os.getenv("WHISPER_FILTER_LOW_CONFIDENCE", "1") == "1"
+               if filter_low_confidence is None else filter_low_confidence)
     out: list[dict[str, Any]] = []
     for item in result.get("segments", []):
         text = str(item.get("text", "")).strip()
         if not text:
             continue
         noise, logprob = item.get("no_speech_prob"), item.get("avg_logprob")
-        if (os.getenv("WHISPER_FILTER_LOW_CONFIDENCE", "1") == "1"
+        if (enabled
                 and isinstance(noise, (float, int)) and isinstance(logprob, (float, int))
                 and noise >= 0.85 and logprob < -1.2):
             continue
